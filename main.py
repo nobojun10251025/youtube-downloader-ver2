@@ -82,6 +82,11 @@ HTML = """
             font-size: 14px;
             color: #cccccc;
         }
+
+        .quality-buttons a button {
+            width: 150px;
+            margin: 6px;
+        }
     </style>
 </head>
 
@@ -120,11 +125,23 @@ HTML = """
 
     <br>
 
-    <a href="/download?v={{ video_id }}">
-        <button>
-            高画質MP4ダウンロード
-        </button>
-    </a>
+    <div class="quality-buttons">
+        <a href="/download?v={{ video_id }}&q=1080">
+            <button>1080pでDL</button>
+        </a>
+
+        <a href="/download?v={{ video_id }}&q=720">
+            <button>720pでDL</button>
+        </a>
+
+        <a href="/download?v={{ video_id }}&q=480">
+            <button>480pでDL</button>
+        </a>
+
+        <a href="/download?v={{ video_id }}&q=360">
+            <button>安定版360p</button>
+        </a>
+    </div>
 
     <br>
 
@@ -151,7 +168,7 @@ HTML = """
     </a>
 
     <p class="note">
-        1080p → 720p → 480p → 360p の順で試します。動画によっては360pのみの場合があります。
+        1080p・720pは動画によって失敗する場合があります。その場合は720pか360pを試してください。
     </p>
 
 </div>
@@ -341,7 +358,7 @@ def find_any_file(folder):
     return max(found, key=os.path.getctime)
 
 
-def wait_for_mp4_file(folder, seconds=15):
+def wait_for_mp4_file(folder, seconds=20):
     for _ in range(seconds):
         mp4_file = find_mp4_file(folder)
 
@@ -351,6 +368,34 @@ def wait_for_mp4_file(folder, seconds=15):
         time.sleep(1)
 
     return None
+
+
+def get_quality_formats(quality):
+    if quality == "1080":
+        return [
+            "137+140/136+140/135+140/134+140/18",
+            "bv*[ext=mp4][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/18",
+            "18",
+        ]
+
+    if quality == "720":
+        return [
+            "136+140/135+140/134+140/18",
+            "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/18",
+            "18",
+        ]
+
+    if quality == "480":
+        return [
+            "135+140/134+140/18",
+            "bv*[ext=mp4][height<=480]+ba[ext=m4a]/b[ext=mp4][height<=480]/18",
+            "18",
+        ]
+
+    return [
+        "18",
+        "best[ext=mp4]/best",
+    ]
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -528,8 +573,6 @@ def formats_check():
     if cookie_error:
         return cookie_error
 
-    # webはcookieありで安定。
-    # android_vrはcookie非対応なのでcookieなしで試す。
     clients = [
         {"name": "web", "cookie": True},
         {"name": "default", "cookie": True},
@@ -578,11 +621,7 @@ OUTPUT:
                 or " 135 " in output
                 or " 134 " in output
                 or " 140 " in output
-                or " mp4 " in output
-                or " m4a " in output
-                or " webm " in output
-                or "audio only" in output
-                or "video only" in output
+                or " 18 " in output
             ):
                 break
 
@@ -625,6 +664,8 @@ def download():
     if not url:
         return "URLまたは動画IDがありません"
 
+    quality = request.args.get("q", "720")
+
     cookie_path, cookie_error = prepare_cookie()
 
     if cookie_error:
@@ -638,8 +679,6 @@ def download():
     temp_dir = tempfile.mkdtemp(prefix="yt_")
     output_path = os.path.join(temp_dir, "%(id)s.%(ext)s")
 
-    # まずweb + cookieで高画質を試す。
-    # その後、android_vr + cookieなしも試す。
     clients = [
         {"name": "web", "cookie": True},
         {"name": "default", "cookie": True},
@@ -648,19 +687,7 @@ def download():
         {"name": "android", "cookie": True},
     ]
 
-    # 137+140 = 1080p mp4 + m4a
-    # 136+140 = 720p mp4 + m4a
-    # 135+140 = 480p mp4 + m4a
-    # 134+140 = 360p mp4 + m4a
-    # 18 = 360p 音声付きmp4
-    format_patterns = [
-        "137+140/136+140/135+140/134+140/18",
-        "136+140/135+140/134+140/18",
-        "135+140/134+140/18",
-        "134+140/18",
-        "bv*[ext=mp4][height<=1080]+ba[ext=m4a]/b[ext=mp4]/18",
-        "18",
-    ]
+    format_patterns = get_quality_formats(quality)
 
     errors = []
 
@@ -700,7 +727,7 @@ def download():
                         return send_file(
                             mp4_file,
                             as_attachment=True,
-                            download_name=f"{safe_video_id}.mp4",
+                            download_name=f"{safe_video_id}_{quality}p.mp4",
                             conditional=False,
                             max_age=0
                         )
@@ -721,6 +748,7 @@ def download():
                         f"""
 client={client}
 cookie={use_cookie}
+quality={quality}
 format={fmt}
 return code={code}
 STDOUT:
@@ -747,8 +775,7 @@ STDERR:
 
     return f"""
     <h2>DL失敗</h2>
-    <p>すべてのclient / formatで失敗しました。</p>
-    <p>形式チェックで 137 / 136 / 140 が出ているか確認してください。</p>
+    <p>{quality}pで失敗しました。720pや360pも試してください。</p>
     <pre>{html.escape(error_output)}</pre>
     """
 
