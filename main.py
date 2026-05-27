@@ -7,6 +7,8 @@ import sys
 import traceback
 import html
 import json
+import re
+import time
 import imageio_ffmpeg
 from urllib.parse import urlparse, parse_qs
 
@@ -16,12 +18,12 @@ HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>YouTube MP4 Downloader</title>
+    <title>YouTube 360p MP4 Downloader</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
     <style>
         body {
-            font-family: Arial;
+            font-family: Arial, sans-serif;
             background: #0f0f0f;
             color: white;
             text-align: center;
@@ -29,12 +31,19 @@ HTML = """
             padding: 20px;
         }
 
+        h1 {
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+
         input {
             width: 85%;
-            padding: 12px;
+            max-width: 650px;
+            padding: 13px;
             border-radius: 10px;
             border: none;
             margin-top: 20px;
+            font-size: 16px;
         }
 
         button {
@@ -45,20 +54,27 @@ HTML = """
             color: white;
             margin-top: 15px;
             cursor: pointer;
+            font-size: 15px;
+        }
+
+        button:hover {
+            opacity: 0.9;
         }
 
         .box {
             background: #1f1f1f;
             padding: 15px;
-            margin-top: 20px;
+            margin: 20px auto 0;
             border-radius: 12px;
+            max-width: 760px;
         }
 
         iframe {
             width: 100%;
-            max-width: 600px;
-            height: 320px;
+            max-width: 650px;
+            height: 340px;
             border: none;
+            border-radius: 10px;
         }
 
         pre {
@@ -71,6 +87,7 @@ HTML = """
             color: #ddd;
             max-height: 500px;
             overflow-y: auto;
+            font-size: 13px;
         }
 
         a {
@@ -81,6 +98,7 @@ HTML = """
         .note {
             font-size: 14px;
             color: #cccccc;
+            line-height: 1.6;
         }
 
         .warning {
@@ -98,29 +116,41 @@ HTML = """
             font-weight: bold;
         }
 
-        .quality-buttons button {
-            width: 170px;
-            margin: 6px;
-        }
-
         .info-grid {
             text-align: left;
             max-width: 650px;
             margin: 0 auto;
             line-height: 1.7;
         }
+
+        .download-main {
+            background: #e60000;
+            font-size: 18px;
+            padding: 15px 24px;
+            width: 280px;
+        }
+
+        .sub-button {
+            background: #444;
+            margin-left: 4px;
+            margin-right: 4px;
+        }
     </style>
 </head>
 
 <body>
 
-<h1>YouTube MP4 Downloader</h1>
+<h1>YouTube 360p MP4 Downloader</h1>
+
+<p class="note">
+    Render無料運用向けの安定版です。360pの音声付きMP4を優先して取得します。
+</p>
 
 <form method="POST">
     <input
         type="text"
         name="input"
-        placeholder="YouTube URLを貼ってください">
+        placeholder="YouTube URL / Shorts URL / 動画ID を貼ってください">
 
     <br>
 
@@ -153,8 +183,8 @@ HTML = """
         <div class="info-grid">
             <p><strong>タイトル：</strong>{{ analysis.title }}</p>
             <p><strong>長さ：</strong>{{ analysis.duration_text }}</p>
-            <p><strong>取得できる画質：</strong>{{ analysis.qualities_text }}</p>
-            <p class="ok"><strong>おすすめ：</strong>{{ analysis.recommended }}p</p>
+            <p><strong>Render上で見えている画質：</strong>{{ analysis.qualities_text }}</p>
+            <p class="ok"><strong>おすすめ：</strong>360p安定版</p>
 
             {% if analysis.warning %}
             <p class="warning">{{ analysis.warning }}</p>
@@ -165,58 +195,324 @@ HTML = """
         {% else %}
         <p class="danger">動画情報の解析に失敗しました</p>
         <p>{{ analysis.reason }}</p>
+
+        {% if analysis.cookie_help %}
+        <a href="/cookie-help">
+            <button class="sub-button">
+                Cookie更新方法を見る
+            </button>
+        </a>
+        {% endif %}
         {% endif %}
     </div>
     {% endif %}
 
     <br>
 
-    <div class="quality-buttons">
-        <a href="/download?v={{ video_id }}&q=auto">
-            <button>
-                自動・高画質DL
-            </button>
-        </a>
-
-        <a href="/download?v={{ video_id }}&q=1080">
-            <button>
-                1080p優先
-            </button>
-        </a>
-
-        <a href="/download?v={{ video_id }}&q=720">
-            <button>
-                720p優先
-            </button>
-        </a>
-
-        <a href="/download?v={{ video_id }}&q=360">
-            <button>
-                安定版360p
-            </button>
-        </a>
-    </div>
+    <a href="/confirm?v={{ video_id }}">
+        <button class="download-main">
+            ダウンロード確認へ
+        </button>
+    </a>
 
     <br>
 
+    <a href="/warmup?v={{ video_id }}">
+        <button class="sub-button">
+            事前準備
+        </button>
+    </a>
+
     <a href="/formats-check?v={{ video_id }}">
-        <button>
+        <button class="sub-button">
             形式チェック
         </button>
     </a>
 
     <a href="/runtime-check">
-        <button>
+        <button class="sub-button">
             Runtime確認
         </button>
     </a>
 
+    <a href="/cookie-check">
+        <button class="sub-button">
+            Cookie確認
+        </button>
+    </a>
+
+    <a href="/cookie-help">
+        <button class="sub-button">
+            Cookie更新方法
+        </button>
+    </a>
+
     <p class="note">
-        この版はnot found対策として、ダウンロード完了後すぐ同じリクエスト内でMP4を返します。
+        初回だけ失敗する場合は「事前準備」を一度押してから、もう一度ダウンロードしてください。
     </p>
 
 </div>
 {% endif %}
+
+</body>
+</html>
+"""
+
+
+CONFIRM_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ダウンロード確認</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #0f0f0f;
+            color: white;
+            text-align: center;
+            margin: 0;
+            padding: 20px;
+        }
+
+        .box {
+            background: #1f1f1f;
+            padding: 18px;
+            margin: 20px auto 0;
+            border-radius: 12px;
+            max-width: 760px;
+        }
+
+        button {
+            padding: 14px 22px;
+            border-radius: 10px;
+            border: none;
+            background: red;
+            color: white;
+            margin-top: 15px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+
+        .sub-button {
+            background: #444;
+        }
+
+        iframe {
+            width: 100%;
+            max-width: 650px;
+            height: 340px;
+            border: none;
+            border-radius: 10px;
+        }
+
+        a {
+            color: white;
+            text-decoration: none;
+        }
+
+        .note {
+            font-size: 14px;
+            color: #cccccc;
+            line-height: 1.6;
+        }
+
+        .warning {
+            color: #ffcc66;
+            font-weight: bold;
+        }
+
+        .ok {
+            color: #99ff99;
+            font-weight: bold;
+        }
+
+        .danger {
+            color: #ff7777;
+            font-weight: bold;
+        }
+
+        .info-grid {
+            text-align: left;
+            max-width: 650px;
+            margin: 0 auto;
+            line-height: 1.7;
+        }
+    </style>
+
+    <script>
+        function showDownloading(button) {
+            button.innerText = "ダウンロード処理中...";
+            button.disabled = true;
+            return true;
+        }
+    </script>
+</head>
+
+<body>
+
+<h1>ダウンロード確認</h1>
+
+<div class="box">
+
+    <iframe
+        src="https://www.youtube.com/embed/{{ video_id }}"
+        allowfullscreen>
+    </iframe>
+
+    <div class="box">
+        <h3>この動画を360p MP4で保存します</h3>
+
+        {% if analysis and analysis.ok %}
+        <div class="info-grid">
+            <p><strong>タイトル：</strong>{{ analysis.title }}</p>
+            <p><strong>長さ：</strong>{{ analysis.duration_text }}</p>
+            <p><strong>Render上で見えている画質：</strong>{{ analysis.qualities_text }}</p>
+
+            {% if analysis.warning %}
+            <p class="warning">{{ analysis.warning }}</p>
+            {% endif %}
+
+            <p class="ok">保存形式：360p MP4</p>
+            <p class="note">{{ analysis.message }}</p>
+        </div>
+        {% else %}
+        <p class="warning">
+            動画情報の詳細解析はできませんでしたが、360p MP4で取得を試します。
+        </p>
+        {% endif %}
+    </div>
+
+    <a href="/download?v={{ video_id }}" onclick="return showDownloading(this.querySelector('button'));">
+        <button>
+            この内容でダウンロードする
+        </button>
+    </a>
+
+    <br>
+
+    <a href="/">
+        <button class="sub-button">
+            戻る
+        </button>
+    </a>
+
+    <p class="note">
+        処理中は画面が止まったように見えることがあります。完了するとMP4保存画面が開きます。
+    </p>
+
+</div>
+
+</body>
+</html>
+"""
+
+
+COOKIE_HELP_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Cookie更新方法</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #0f0f0f;
+            color: white;
+            margin: 0;
+            padding: 20px;
+            line-height: 1.7;
+        }
+
+        .box {
+            background: #1f1f1f;
+            padding: 18px;
+            margin: 20px auto 0;
+            border-radius: 12px;
+            max-width: 760px;
+        }
+
+        code, pre {
+            background: #111;
+            color: #ddd;
+            padding: 8px;
+            border-radius: 8px;
+            display: block;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        button {
+            padding: 12px 18px;
+            border-radius: 10px;
+            border: none;
+            background: red;
+            color: white;
+            margin-top: 15px;
+            cursor: pointer;
+        }
+
+        a {
+            color: white;
+            text-decoration: none;
+        }
+
+        .warning {
+            color: #ffcc66;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="box">
+    <h1>Cookie更新方法</h1>
+
+    <p class="warning">
+        cookies.txt はログイン状態の鍵のようなものです。GitHubや他人に見える場所には絶対に置かないでください。
+    </p>
+
+    <h3>エラーの目安</h3>
+    <p>以下が出たら、cookies.txtの更新が必要な可能性が高いです。</p>
+
+    <pre>Sign in to confirm you’re not a bot</pre>
+
+    <h3>更新手順</h3>
+
+    <ol>
+        <li>ChromeでYouTubeにログインする</li>
+        <li>シークレットウィンドウを使う場合は、Cookie出力用拡張機能をシークレットで許可する</li>
+        <li>YouTubeにログインした同じタブで以下を開く</li>
+    </ol>
+
+    <pre>https://www.youtube.com/robots.txt</pre>
+
+    <ol start="4">
+        <li>Cookie出力拡張機能で cookies.txt をExportする</li>
+        <li>RenderのWeb Serviceを開く</li>
+        <li>Environment → Secret Files を開く</li>
+        <li>Filenameを <strong>cookies.txt</strong> にする</li>
+        <li>Contentsに新しいcookies.txtの中身を全部貼る</li>
+        <li>Manual Deployする</li>
+    </ol>
+
+    <h3>Secret File名</h3>
+
+    <pre>cookies.txt</pre>
+
+    <p>名前が <code>cookie.txt</code> や <code>Cookies.txt</code> だと動きません。</p>
+
+    <a href="/cookie-check">
+        <button>Cookie確認へ</button>
+    </a>
+
+    <a href="/">
+        <button>トップへ戻る</button>
+    </a>
+</div>
 
 </body>
 </html>
@@ -228,6 +524,7 @@ def handle_exception(e):
     error_text = traceback.format_exc()
     return f"""
     <h2>アプリ内部エラー</h2>
+    <p>以下をコピーして確認してください。</p>
     <pre>{html.escape(error_text)}</pre>
     """, 500
 
@@ -237,6 +534,9 @@ def get_video_id(text):
         return None
 
     text = text.strip()
+
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", text):
+        return text
 
     try:
         parsed = urlparse(text)
@@ -249,6 +549,9 @@ def get_video_id(text):
             if parsed.path.startswith("/shorts/"):
                 return parsed.path.split("/shorts/")[1].split("/")[0]
 
+            if parsed.path.startswith("/embed/"):
+                return parsed.path.split("/embed/")[1].split("/")[0]
+
         if "youtu.be" in parsed.netloc:
             return parsed.path.strip("/").split("/")[0]
 
@@ -259,14 +562,19 @@ def get_video_id(text):
 
 
 def prepare_cookie():
-    secret_cookie = "/etc/secrets/cookies.txt"
-    cookie_path = "/tmp/cookies.txt"
+    render_cookie = "/etc/secrets/cookies.txt"
+    local_cookie = "cookies.txt"
+    cookie_path = f"/tmp/cookies_runtime_{os.getpid()}.txt"
 
-    if not os.path.exists(secret_cookie):
-        return None, "cookies.txt がRenderにありません"
+    if os.path.exists(render_cookie):
+        source_cookie = render_cookie
+    elif os.path.exists(local_cookie):
+        source_cookie = local_cookie
+    else:
+        return None, "cookies.txt が見つかりません。RenderではSecret File名を cookies.txt にしてください。"
 
     try:
-        shutil.copy(secret_cookie, cookie_path)
+        shutil.copy(source_cookie, cookie_path)
     except Exception as e:
         return None, f"cookieコピー失敗: {str(e)}"
 
@@ -291,6 +599,11 @@ def get_deno_path():
     for path in candidates:
         if os.path.exists(path):
             return path
+
+    found = shutil.which("deno")
+
+    if found:
+        return found
 
     return "deno"
 
@@ -382,79 +695,49 @@ def explain_error(text):
     lower = text.lower()
 
     if "sign in to confirm" in lower or "not a bot" in lower:
-        return "YouTube側にbot判定されています。cookies.txtが切れている、またはログイン状態が弱い可能性があります。cookies.txtを作り直してください。"
+        return "YouTube側にbot判定されています。cookies.txtが切れている可能性があります。cookies.txtを作り直してRenderのSecret Fileに入れ直してください。"
 
     if "requested format is not available" in lower:
-        return "指定した画質がこの動画では取得できません。720pや360pなど、低い画質を試してください。"
+        return "指定した形式がこの動画では取得できません。形式チェックで 18 mp4 が出ているか確認してください。"
 
     if "only images are available" in lower or ("storyboard" in lower and "mp4" not in lower):
-        return "動画本体ではなく、シークバー用のプレビュー画像だけが見えています。Deno、cookies、またはRenderのIP制限が原因の可能性があります。"
+        return "動画本体ではなく、シークバー用のプレビュー画像だけが見えています。Deno、cookies、RenderのIP制限のどれかが原因の可能性があります。"
 
     if "no supported javascript runtime" in lower or ("deno" in lower and "no such file" in lower):
         return "Denoが正しく動いていません。Build CommandでDenoが入っているか、runtime-checkを確認してください。"
 
     if "ffmpeg" in lower:
-        return "ffmpeg関連のエラーです。映像と音声の結合に失敗している可能性があります。ffmpeg-checkを確認してください。"
+        return "ffmpeg関連のエラーです。ffmpeg-checkを確認してください。"
 
     if "timeout" in lower or "timed out" in lower or "タイムアウト" in text:
-        return "処理が時間切れになりました。動画が長い、画質が高すぎる、またはRenderの処理時間制限に近い可能性があります。360pで試してください。"
+        return "処理が時間切れになりました。動画が長い、またはRender側の処理制限に近い可能性があります。短い動画から試してください。"
 
     if "http error 403" in lower or "forbidden" in lower:
         return "YouTube側にアクセスを拒否されています。cookies.txtの更新、または時間を置いて再試行してください。"
 
     if "read-only file system" in lower:
-        return "RenderのSecret Fileを直接書き換えようとして失敗しています。cookies.txtを/tmpにコピーして使う必要があります。"
+        return "RenderのSecret Fileを直接書き換えようとして失敗しています。cookies.txtは/tmpにコピーして使う必要があります。"
 
-    if "file is missing" in lower or "file not found" in lower or "not found" in lower:
-        return "ファイル生成直後の取得に失敗しています。この版では直接返す方式にしているので、再試行するか360pで試してください。"
+    if "file not found" in lower or "not found" in lower:
+        return "生成ファイルの取得に失敗しています。もう一度試すか、事前準備を押してから再試行してください。"
 
-    return "原因を特定できませんでした。形式チェックで取得可能な画質を確認し、低い画質から試してください。"
+    return "原因を特定できませんでした。形式チェック、Cookie確認、Runtime確認の順で確認してください。"
 
 
-def analyze_formats(formats):
-    heights = set()
-    has_audio = False
-    has_18 = False
+def safe_filename(name):
+    if not name:
+        return "video.mp4"
 
-    for f in formats:
-        vcodec = f.get("vcodec")
-        acodec = f.get("acodec")
-        ext = f.get("ext")
-        height = f.get("height")
-        format_id = str(f.get("format_id", ""))
+    name = re.sub(r'[\\/:*?"<>|]+', "_", name)
+    name = name.strip()
 
-        if format_id == "18":
-            has_18 = True
-            heights.add(360)
-            has_audio = True
+    if not name:
+        name = "video"
 
-        if acodec and acodec != "none" and ext in ["m4a", "mp4", "webm"]:
-            has_audio = True
+    if not name.lower().endswith(".mp4"):
+        name += ".mp4"
 
-        if vcodec and vcodec != "none" and height:
-            try:
-                heights.add(int(height))
-            except Exception:
-                pass
-
-    qualities = []
-
-    if has_audio:
-        if any(h >= 1080 for h in heights):
-            qualities.append(1080)
-
-        if any(h >= 720 for h in heights):
-            qualities.append(720)
-
-        if any(h >= 480 for h in heights):
-            qualities.append(480)
-
-        if any(h >= 360 for h in heights) or has_18:
-            qualities.append(360)
-
-    qualities = sorted(list(set(qualities)), reverse=True)
-
-    return qualities
+    return name[:140]
 
 
 def get_json_from_stdout(stdout):
@@ -480,6 +763,44 @@ def get_json_from_stdout(stdout):
     return None
 
 
+def analyze_formats(formats):
+    heights = set()
+    has_18 = False
+
+    for f in formats:
+        vcodec = f.get("vcodec")
+        height = f.get("height")
+        format_id = str(f.get("format_id", ""))
+
+        if format_id == "18":
+            has_18 = True
+            heights.add(360)
+
+        if vcodec and vcodec != "none" and height:
+            try:
+                heights.add(int(height))
+            except Exception:
+                pass
+
+    qualities = []
+
+    if any(h >= 1080 for h in heights):
+        qualities.append(1080)
+
+    if any(h >= 720 for h in heights):
+        qualities.append(720)
+
+    if any(h >= 480 for h in heights):
+        qualities.append(480)
+
+    if any(h >= 360 for h in heights) or has_18:
+        qualities.append(360)
+
+    qualities = sorted(list(set(qualities)), reverse=True)
+
+    return qualities, has_18
+
+
 def analyze_video(video_id):
     url = f"https://www.youtube.com/watch?v={video_id}"
 
@@ -488,13 +809,13 @@ def analyze_video(video_id):
     if cookie_error:
         return {
             "ok": False,
-            "reason": cookie_error
+            "reason": cookie_error,
+            "cookie_help": True
         }
 
     clients = [
         {"name": "web", "cookie": True},
         {"name": "default", "cookie": True},
-        {"name": "android_vr", "cookie": False},
         {"name": "ios", "cookie": True},
         {"name": "android", "cookie": True},
     ]
@@ -508,7 +829,7 @@ def analyze_video(video_id):
         cmd = base_ytdlp_cmd(cookie_path if use_cookie else None)
         cmd = add_client_args(cmd, client)
 
-        cmd = cmd + [
+        cmd += [
             "-J",
             url
         ]
@@ -529,41 +850,32 @@ def analyze_video(video_id):
             duration = info.get("duration")
             formats = info.get("formats", [])
 
-            qualities = analyze_formats(formats)
+            qualities, has_18 = analyze_formats(formats)
 
             if not qualities:
                 continue
 
             warning = ""
-            message = "取得できる画質を自動判定しました。"
+            message = "360pの音声付きMP4を優先して取得します。"
 
             if duration and duration >= 1800:
-                warning = "この動画は30分以上あります。Renderでは高画質DLが失敗しやすいので、360p推奨です。"
+                warning = "この動画は30分以上あります。Renderでは長い動画が失敗しやすいので注意してください。"
             elif duration and duration >= 600:
-                warning = "この動画は10分以上あります。1080pは失敗する可能性があります。720pか360pがおすすめです。"
+                warning = "この動画は10分以上あります。失敗した場合は時間を置いて再試行してください。"
 
-            if qualities == [360]:
-                message = "この動画はRender上では360pのみ確認できました。高画質ボタンを押しても360pになる可能性が高いです。"
+            if not has_18:
+                warning = "Render上で安定版の18番MP4が見えていません。ダウンロードに失敗する可能性があります。"
+                message = "形式チェックで18 mp4が出ているか確認してください。"
 
-            if 720 in qualities:
-                recommended = 720
-            else:
-                recommended = qualities[-1]
-
-            if duration and duration >= 600:
-                if 360 in qualities:
-                    recommended = 360
-                elif 480 in qualities:
-                    recommended = 480
+            qualities_text = " / ".join([f"{q}p" for q in qualities])
 
             return {
                 "ok": True,
-                "title": html.escape(title),
+                "title": title,
                 "duration": duration,
                 "duration_text": seconds_to_text(duration),
                 "qualities": qualities,
-                "qualities_text": " / ".join([f"{q}p" for q in qualities]),
-                "recommended": recommended,
+                "qualities_text": qualities_text,
                 "warning": warning,
                 "message": message,
                 "client": client
@@ -573,9 +885,12 @@ def analyze_video(video_id):
             last_output += "\n" + str(e)
             continue
 
+    reason = explain_error(last_output)
+
     return {
         "ok": False,
-        "reason": explain_error(last_output)
+        "reason": reason,
+        "cookie_help": "cookies.txt" in reason or "bot判定" in reason
     }
 
 
@@ -612,38 +927,6 @@ def find_any_file(folder):
     return max(found, key=os.path.getctime)
 
 
-def get_quality_formats(quality):
-    if quality == "1080":
-        return [
-            "137+140/136+140/135+140/134+140/18",
-            "bv*[ext=mp4][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/18",
-            "18",
-        ]
-
-    if quality == "720":
-        return [
-            "136+140/135+140/134+140/18",
-            "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/18",
-            "18",
-        ]
-
-    if quality == "360":
-        return [
-            "18",
-            "best[ext=mp4]/best",
-        ]
-
-    # auto
-    return [
-        "137+140/136+140/135+140/134+140/18",
-        "136+140/135+140/134+140/18",
-        "135+140/134+140/18",
-        "134+140/18",
-        "bv*[ext=mp4][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/18",
-        "18",
-    ]
-
-
 @app.route("/", methods=["GET", "POST"])
 def home():
     video_id = None
@@ -667,10 +950,25 @@ def home():
     )
 
 
+@app.route("/confirm")
+def confirm():
+    video_id = request.args.get("v")
+
+    if not video_id:
+        return "動画IDがありません", 400
+
+    analysis = analyze_video(video_id)
+
+    return render_template_string(
+        CONFIRM_HTML,
+        video_id=video_id,
+        analysis=analysis
+    )
+
+
 @app.route("/download")
 def download():
     video_id = request.args.get("v")
-    quality = request.args.get("q", "auto")
 
     if not video_id:
         return "動画IDがありません", 400
@@ -684,6 +982,7 @@ def download():
         <h2>DL失敗</h2>
         <p>{html.escape(cookie_error)}</p>
         <p>{html.escape(explain_error(cookie_error))}</p>
+        <a href="/cookie-help"><button>Cookie更新方法を見る</button></a>
         """, 500
 
     ffmpeg_path = get_ffmpeg_path()
@@ -693,6 +992,7 @@ def download():
         <h2>DL失敗</h2>
         <p>ffmpegが取得できません</p>
         <p>ffmpeg-checkを確認してください。</p>
+        <a href="/ffmpeg-check"><button>ffmpeg確認</button></a>
         """, 500
 
     temp_dir = tempfile.mkdtemp(prefix="yt_")
@@ -701,12 +1001,15 @@ def download():
     clients = [
         {"name": "web", "cookie": True},
         {"name": "default", "cookie": True},
-        {"name": "android_vr", "cookie": False},
         {"name": "ios", "cookie": True},
         {"name": "android", "cookie": True},
     ]
 
-    format_patterns = get_quality_formats(quality)
+    format_patterns = [
+        "18",
+        "18/best[ext=mp4][height<=360]/best[height<=360]",
+        "best[ext=mp4]/best",
+    ]
 
     errors = []
 
@@ -718,7 +1021,7 @@ def download():
             cmd = base_ytdlp_cmd(cookie_path if use_cookie else None)
             cmd = add_client_args(cmd, client)
 
-            cmd = cmd + [
+            cmd += [
                 "--ffmpeg-location",
                 ffmpeg_path,
 
@@ -726,6 +1029,9 @@ def download():
                 fmt,
 
                 "--merge-output-format",
+                "mp4",
+
+                "--recode-video",
                 "mp4",
 
                 "-o",
@@ -740,10 +1046,13 @@ def download():
                 output = stdout + "\n" + stderr
 
                 if code == 0:
+                    time.sleep(1)
+
                     mp4_file = find_mp4_file(temp_dir)
 
                     if mp4_file and os.path.exists(mp4_file):
                         filename = os.path.basename(mp4_file)
+                        filename = safe_filename(filename)
 
                         return send_file(
                             mp4_file,
@@ -769,7 +1078,6 @@ def download():
                         f"""
 client={client}
 cookie={use_cookie}
-quality={quality}
 format={fmt}
 return code={code}
 STDOUT:
@@ -796,12 +1104,63 @@ STDERR:
 
     reason = explain_error(error_output)
 
+    cookie_button = ""
+
+    if "cookies" in reason or "bot判定" in reason:
+        cookie_button = '<a href="/cookie-help"><button>Cookie更新方法を見る</button></a>'
+
     return f"""
     <h2>DL失敗</h2>
     <p><strong>日本語の原因候補：</strong>{html.escape(reason)}</p>
-    <p>{html.escape(quality)} で失敗しました。720pや360pも試してください。</p>
+    <p>360p安定版でも失敗しました。Cookie確認・Runtime確認・形式チェックを見てください。</p>
+
+    <a href="/confirm?v={html.escape(video_id)}"><button>もう一度試す</button></a>
+    <a href="/formats-check?v={html.escape(video_id)}"><button>形式チェック</button></a>
+    <a href="/runtime-check"><button>Runtime確認</button></a>
+    <a href="/cookie-check"><button>Cookie確認</button></a>
+    {cookie_button}
+
     <pre>{html.escape(error_output)}</pre>
     """, 500
+
+
+@app.route("/warmup")
+def warmup():
+    video_id = request.args.get("v")
+
+    if not video_id:
+        return "動画IDがありません", 400
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    cookie_path, cookie_error = prepare_cookie()
+
+    if cookie_error:
+        return cookie_error, 500
+
+    cmd = base_ytdlp_cmd(cookie_path)
+    cmd = add_client_args(cmd, "web")
+    cmd += ["-F", url]
+
+    try:
+        code, stdout, stderr = run_command(cmd, timeout=180)
+        output = stdout + "\n" + stderr
+
+        return f"""
+        <h2>事前準備 完了</h2>
+        <p>return code: {code}</p>
+        <p>このあと戻って、360p MP4ダウンロードを押してください。</p>
+        <a href="/confirm?v={html.escape(video_id)}"><button>確認画面へ戻る</button></a>
+        <pre>{html.escape(output[:30000])}</pre>
+        """
+
+    except Exception as e:
+        return f"事前準備エラー: {html.escape(str(e))}", 500
+
+
+@app.route("/cookie-help")
+def cookie_help():
+    return render_template_string(COOKIE_HELP_HTML)
 
 
 @app.route("/health")
@@ -873,14 +1232,25 @@ deno path used
 
 @app.route("/cookie-check")
 def cookie_check():
-    secret_cookie = "/etc/secrets/cookies.txt"
+    render_cookie = "/etc/secrets/cookies.txt"
+    local_cookie = "cookies.txt"
 
-    if not os.path.exists(secret_cookie):
-        return "NG: /etc/secrets/cookies.txt が存在しません"
+    if os.path.exists(render_cookie):
+        cookie_file = render_cookie
+        location = "Render Secret File"
+    elif os.path.exists(local_cookie):
+        cookie_file = local_cookie
+        location = "Local cookies.txt"
+    else:
+        return """
+        <h2>Cookie Check</h2>
+        <p>NG: cookies.txt が存在しません</p>
+        <a href="/cookie-help"><button>Cookie更新方法を見る</button></a>
+        """
 
-    size = os.path.getsize(secret_cookie)
+    size = os.path.getsize(cookie_file)
 
-    with open(secret_cookie, "r", encoding="utf-8", errors="ignore") as f:
+    with open(cookie_file, "r", encoding="utf-8", errors="ignore") as f:
         text = f.read()
 
     has_youtube = "youtube.com" in text
@@ -890,12 +1260,18 @@ def cookie_check():
 
     return f"""
     <h2>Cookie Check</h2>
+    <p>location: {location}</p>
     <p>file: OK</p>
     <p>size: {size} bytes</p>
     <p>Netscape形式: {starts_ok}</p>
     <p>youtube.com cookieあり: {has_youtube}</p>
     <p>google.com cookieあり: {has_google}</p>
     <p>ログイン系cookieらしきものあり: {has_sid}</p>
+
+    <hr>
+
+    <p>bot判定エラーが出る場合は、cookies.txtを作り直してください。</p>
+    <a href="/cookie-help"><button>Cookie更新方法を見る</button></a>
     """
 
 
@@ -931,7 +1307,6 @@ def formats_check():
     clients = [
         {"name": "web", "cookie": True},
         {"name": "default", "cookie": True},
-        {"name": "android_vr", "cookie": False},
         {"name": "ios", "cookie": True},
         {"name": "android", "cookie": True},
     ]
@@ -945,14 +1320,10 @@ def formats_check():
         cmd = base_ytdlp_cmd(cookie_path if use_cookie else None)
         cmd = add_client_args(cmd, client)
 
-        cmd = cmd + [
-            "-F",
-            url
-        ]
+        cmd += ["-F", url]
 
         try:
             code, stdout, stderr = run_command(cmd, timeout=180)
-
             output = stdout + "\n" + stderr
 
             outputs.append(
@@ -967,14 +1338,7 @@ OUTPUT:
 """
             )
 
-            if (
-                " 137 " in output
-                or " 136 " in output
-                or " 135 " in output
-                or " 134 " in output
-                or " 140 " in output
-                or " 18 " in output
-            ):
+            if " 18 " in output or " mp4 " in output:
                 break
 
         except subprocess.TimeoutExpired:
