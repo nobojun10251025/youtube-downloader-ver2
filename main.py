@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string, send_file, jsonify
+from flask import Flask, request, render_template_string, send_file
 import os
 import shutil
 import tempfile
@@ -6,16 +6,11 @@ import subprocess
 import sys
 import traceback
 import html
-import time
-import uuid
-import threading
-import re
+import json
 import imageio_ffmpeg
 from urllib.parse import urlparse, parse_qs
 
 app = Flask(__name__)
-
-JOBS = {}
 
 HTML = """
 <!DOCTYPE html>
@@ -52,11 +47,6 @@ HTML = """
             cursor: pointer;
         }
 
-        button:disabled {
-            background: #555;
-            cursor: not-allowed;
-        }
-
         .box {
             background: #1f1f1f;
             padding: 15px;
@@ -79,7 +69,7 @@ HTML = """
             padding: 10px;
             border-radius: 10px;
             color: #ddd;
-            max-height: 350px;
+            max-height: 500px;
             overflow-y: auto;
         }
 
@@ -93,32 +83,31 @@ HTML = """
             color: #cccccc;
         }
 
+        .warning {
+            color: #ffcc66;
+            font-weight: bold;
+        }
+
+        .ok {
+            color: #99ff99;
+            font-weight: bold;
+        }
+
+        .danger {
+            color: #ff7777;
+            font-weight: bold;
+        }
+
         .quality-buttons button {
             width: 170px;
             margin: 6px;
         }
 
-        .progress-wrap {
-            width: 90%;
-            max-width: 600px;
-            margin: 15px auto;
-            background: #333;
-            border-radius: 20px;
-            overflow: hidden;
-        }
-
-        .progress-bar {
-            width: 0%;
-            background: red;
-            height: 24px;
-            line-height: 24px;
-            color: white;
-            transition: width 0.3s;
-        }
-
-        #downloadLink {
-            display: none;
-            margin-top: 15px;
+        .info-grid {
+            text-align: left;
+            max-width: 650px;
+            margin: 0 auto;
+            line-height: 1.7;
         }
     </style>
 </head>
@@ -142,7 +131,7 @@ HTML = """
 
 {% if error %}
 <div class="box">
-    <p>{{ error }}</p>
+    <p class="danger">{{ error }}</p>
 </div>
 {% endif %}
 
@@ -156,41 +145,57 @@ HTML = """
         allowfullscreen>
     </iframe>
 
+    {% if analysis %}
+    <div class="box">
+        <h3>動画情報</h3>
+
+        {% if analysis.ok %}
+        <div class="info-grid">
+            <p><strong>タイトル：</strong>{{ analysis.title }}</p>
+            <p><strong>長さ：</strong>{{ analysis.duration_text }}</p>
+            <p><strong>取得できる画質：</strong>{{ analysis.qualities_text }}</p>
+            <p class="ok"><strong>おすすめ：</strong>{{ analysis.recommended }}p</p>
+
+            {% if analysis.warning %}
+            <p class="warning">{{ analysis.warning }}</p>
+            {% endif %}
+
+            <p class="note">{{ analysis.message }}</p>
+        </div>
+        {% else %}
+        <p class="danger">動画情報の解析に失敗しました</p>
+        <p>{{ analysis.reason }}</p>
+        {% endif %}
+    </div>
+    {% endif %}
+
     <br>
 
     <div class="quality-buttons">
-        <button onclick="startDownload('{{ video_id }}', 'auto')">
-            自動・高画質DL
-        </button>
+        <a href="/download?v={{ video_id }}&q=auto">
+            <button>
+                自動・高画質DL
+            </button>
+        </a>
 
-        <button onclick="startDownload('{{ video_id }}', '1080')">
-            1080p優先
-        </button>
+        <a href="/download?v={{ video_id }}&q=1080">
+            <button>
+                1080p優先
+            </button>
+        </a>
 
-        <button onclick="startDownload('{{ video_id }}', '720')">
-            720p優先
-        </button>
+        <a href="/download?v={{ video_id }}&q=720">
+            <button>
+                720p優先
+            </button>
+        </a>
 
-        <button onclick="startDownload('{{ video_id }}', '360')">
-            安定版360p
-        </button>
+        <a href="/download?v={{ video_id }}&q=360">
+            <button>
+                安定版360p
+            </button>
+        </a>
     </div>
-
-    <div class="progress-wrap">
-        <div id="progressBar" class="progress-bar">0%</div>
-    </div>
-
-    <p id="statusText" class="note">
-        待機中
-    </p>
-
-    <a id="downloadLink" href="#">
-        <button>
-            完成したMP4を保存
-        </button>
-    </a>
-
-    <pre id="logBox"></pre>
 
     <br>
 
@@ -207,102 +212,11 @@ HTML = """
     </a>
 
     <p class="note">
-        自動・高画質DLは、1080p → 720p → 480p → 360pの順で試します。
+        この版はnot found対策として、ダウンロード完了後すぐ同じリクエスト内でMP4を返します。
     </p>
 
 </div>
 {% endif %}
-
-<script>
-let polling = null;
-
-function setButtonsDisabled(disabled) {
-    document.querySelectorAll(".quality-buttons button").forEach(btn => {
-        btn.disabled = disabled;
-    });
-}
-
-function startDownload(videoId, quality) {
-    setButtonsDisabled(true);
-
-    document.getElementById("downloadLink").style.display = "none";
-    document.getElementById("logBox").textContent = "";
-    document.getElementById("statusText").textContent = "準備中...";
-    updateProgress(0);
-
-    fetch("/start-download", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            v: videoId,
-            q: quality
-        })
-    })
-    .then(res => res.json())
-    .then(data => {
-        if (!data.job_id) {
-            document.getElementById("statusText").textContent = "開始失敗";
-            document.getElementById("logBox").textContent = data.error || "不明なエラー";
-            setButtonsDisabled(false);
-            return;
-        }
-
-        pollProgress(data.job_id);
-    })
-    .catch(err => {
-        document.getElementById("statusText").textContent = "通信エラー";
-        document.getElementById("logBox").textContent = err;
-        setButtonsDisabled(false);
-    });
-}
-
-function updateProgress(percent) {
-    const bar = document.getElementById("progressBar");
-    percent = Math.max(0, Math.min(100, percent));
-    bar.style.width = percent + "%";
-    bar.textContent = percent + "%";
-}
-
-function pollProgress(jobId) {
-    if (polling) {
-        clearInterval(polling);
-    }
-
-    polling = setInterval(() => {
-        fetch("/progress/" + jobId)
-        .then(res => res.json())
-        .then(data => {
-            updateProgress(data.progress || 0);
-            document.getElementById("statusText").textContent = data.status || "";
-            document.getElementById("logBox").textContent = data.log || "";
-
-            if (data.state === "done") {
-                clearInterval(polling);
-                updateProgress(100);
-                document.getElementById("statusText").textContent = "完了しました";
-                const link = document.getElementById("downloadLink");
-                link.href = "/file/" + jobId;
-                link.style.display = "inline-block";
-                setButtonsDisabled(false);
-            }
-
-            if (data.state === "error") {
-                clearInterval(polling);
-                document.getElementById("statusText").textContent = "失敗しました";
-                setButtonsDisabled(false);
-            }
-        })
-        .catch(err => {
-            clearInterval(polling);
-            document.getElementById("statusText").textContent = "進捗取得エラー";
-            document.getElementById("logBox").textContent = err;
-            setButtonsDisabled(false);
-        });
-    }, 1500);
-}
-</script>
 
 </body>
 </html>
@@ -441,6 +355,230 @@ def add_client_args(cmd, client_name):
     ]
 
 
+def seconds_to_text(seconds):
+    if seconds is None:
+        return "不明"
+
+    try:
+        seconds = int(seconds)
+    except Exception:
+        return "不明"
+
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+
+    if h > 0:
+        return f"{h}時間{m}分{s}秒"
+
+    if m > 0:
+        return f"{m}分{s}秒"
+
+    return f"{s}秒"
+
+
+def explain_error(text):
+    text = text or ""
+    lower = text.lower()
+
+    if "sign in to confirm" in lower or "not a bot" in lower:
+        return "YouTube側にbot判定されています。cookies.txtが切れている、またはログイン状態が弱い可能性があります。cookies.txtを作り直してください。"
+
+    if "requested format is not available" in lower:
+        return "指定した画質がこの動画では取得できません。720pや360pなど、低い画質を試してください。"
+
+    if "only images are available" in lower or ("storyboard" in lower and "mp4" not in lower):
+        return "動画本体ではなく、シークバー用のプレビュー画像だけが見えています。Deno、cookies、またはRenderのIP制限が原因の可能性があります。"
+
+    if "no supported javascript runtime" in lower or ("deno" in lower and "no such file" in lower):
+        return "Denoが正しく動いていません。Build CommandでDenoが入っているか、runtime-checkを確認してください。"
+
+    if "ffmpeg" in lower:
+        return "ffmpeg関連のエラーです。映像と音声の結合に失敗している可能性があります。ffmpeg-checkを確認してください。"
+
+    if "timeout" in lower or "timed out" in lower or "タイムアウト" in text:
+        return "処理が時間切れになりました。動画が長い、画質が高すぎる、またはRenderの処理時間制限に近い可能性があります。360pで試してください。"
+
+    if "http error 403" in lower or "forbidden" in lower:
+        return "YouTube側にアクセスを拒否されています。cookies.txtの更新、または時間を置いて再試行してください。"
+
+    if "read-only file system" in lower:
+        return "RenderのSecret Fileを直接書き換えようとして失敗しています。cookies.txtを/tmpにコピーして使う必要があります。"
+
+    if "file is missing" in lower or "file not found" in lower or "not found" in lower:
+        return "ファイル生成直後の取得に失敗しています。この版では直接返す方式にしているので、再試行するか360pで試してください。"
+
+    return "原因を特定できませんでした。形式チェックで取得可能な画質を確認し、低い画質から試してください。"
+
+
+def analyze_formats(formats):
+    heights = set()
+    has_audio = False
+    has_18 = False
+
+    for f in formats:
+        vcodec = f.get("vcodec")
+        acodec = f.get("acodec")
+        ext = f.get("ext")
+        height = f.get("height")
+        format_id = str(f.get("format_id", ""))
+
+        if format_id == "18":
+            has_18 = True
+            heights.add(360)
+            has_audio = True
+
+        if acodec and acodec != "none" and ext in ["m4a", "mp4", "webm"]:
+            has_audio = True
+
+        if vcodec and vcodec != "none" and height:
+            try:
+                heights.add(int(height))
+            except Exception:
+                pass
+
+    qualities = []
+
+    if has_audio:
+        if any(h >= 1080 for h in heights):
+            qualities.append(1080)
+
+        if any(h >= 720 for h in heights):
+            qualities.append(720)
+
+        if any(h >= 480 for h in heights):
+            qualities.append(480)
+
+        if any(h >= 360 for h in heights) or has_18:
+            qualities.append(360)
+
+    qualities = sorted(list(set(qualities)), reverse=True)
+
+    return qualities
+
+
+def get_json_from_stdout(stdout):
+    stdout = stdout.strip()
+
+    if not stdout:
+        return None
+
+    try:
+        return json.loads(stdout)
+    except Exception:
+        pass
+
+    start = stdout.find("{")
+    end = stdout.rfind("}")
+
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(stdout[start:end + 1])
+        except Exception:
+            return None
+
+    return None
+
+
+def analyze_video(video_id):
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    cookie_path, cookie_error = prepare_cookie()
+
+    if cookie_error:
+        return {
+            "ok": False,
+            "reason": cookie_error
+        }
+
+    clients = [
+        {"name": "web", "cookie": True},
+        {"name": "default", "cookie": True},
+        {"name": "android_vr", "cookie": False},
+        {"name": "ios", "cookie": True},
+        {"name": "android", "cookie": True},
+    ]
+
+    last_output = ""
+
+    for item in clients:
+        client = item["name"]
+        use_cookie = item["cookie"]
+
+        cmd = base_ytdlp_cmd(cookie_path if use_cookie else None)
+        cmd = add_client_args(cmd, client)
+
+        cmd = cmd + [
+            "-J",
+            url
+        ]
+
+        try:
+            code, stdout, stderr = run_command(cmd, timeout=180)
+            last_output = stdout + "\n" + stderr
+
+            if code != 0:
+                continue
+
+            info = get_json_from_stdout(stdout)
+
+            if not info:
+                continue
+
+            title = info.get("title") or "不明"
+            duration = info.get("duration")
+            formats = info.get("formats", [])
+
+            qualities = analyze_formats(formats)
+
+            if not qualities:
+                continue
+
+            warning = ""
+            message = "取得できる画質を自動判定しました。"
+
+            if duration and duration >= 1800:
+                warning = "この動画は30分以上あります。Renderでは高画質DLが失敗しやすいので、360p推奨です。"
+            elif duration and duration >= 600:
+                warning = "この動画は10分以上あります。1080pは失敗する可能性があります。720pか360pがおすすめです。"
+
+            if qualities == [360]:
+                message = "この動画はRender上では360pのみ確認できました。高画質ボタンを押しても360pになる可能性が高いです。"
+
+            if 720 in qualities:
+                recommended = 720
+            else:
+                recommended = qualities[-1]
+
+            if duration and duration >= 600:
+                if 360 in qualities:
+                    recommended = 360
+                elif 480 in qualities:
+                    recommended = 480
+
+            return {
+                "ok": True,
+                "title": html.escape(title),
+                "duration": duration,
+                "duration_text": seconds_to_text(duration),
+                "qualities": qualities,
+                "qualities_text": " / ".join([f"{q}p" for q in qualities]),
+                "recommended": recommended,
+                "warning": warning,
+                "message": message,
+                "client": client
+            }
+
+        except Exception as e:
+            last_output += "\n" + str(e)
+            continue
+
+    return {
+        "ok": False,
+        "reason": explain_error(last_output)
+    }
+
+
 def find_mp4_file(folder):
     found = []
 
@@ -506,131 +644,59 @@ def get_quality_formats(quality):
     ]
 
 
-def update_job(job_id, **kwargs):
-    if job_id in JOBS:
-        JOBS[job_id].update(kwargs)
+@app.route("/", methods=["GET", "POST"])
+def home():
+    video_id = None
+    error = None
+    analysis = None
 
+    if request.method == "POST":
+        text = request.form.get("input", "").strip()
+        video_id = get_video_id(text)
 
-def append_log(job_id, text):
-    if job_id not in JOBS:
-        return
+        if not video_id:
+            error = "YouTube URLを入力してください"
+        else:
+            analysis = analyze_video(video_id)
 
-    old = JOBS[job_id].get("log", "")
-    new = old + text + "\n"
-
-    if len(new) > 20000:
-        new = new[-20000:]
-
-    JOBS[job_id]["log"] = new
-
-
-def parse_progress(line):
-    match = re.search(r"(\\d+(?:\\.\\d+)?)%", line)
-
-    if match:
-        try:
-            return int(float(match.group(1)))
-        except Exception:
-            return None
-
-    return None
-
-
-def run_ytdlp_with_progress(job_id, cmd, timeout=420):
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
+    return render_template_string(
+        HTML,
+        video_id=video_id,
+        error=error,
+        analysis=analysis
     )
 
-    start_time = time.time()
 
-    while True:
-        if process.poll() is not None:
-            break
+@app.route("/download")
+def download():
+    video_id = request.args.get("v")
+    quality = request.args.get("q", "auto")
 
-        if time.time() - start_time > timeout:
-            process.kill()
-            return 124
+    if not video_id:
+        return "動画IDがありません", 400
 
-        line = process.stdout.readline()
-
-        if not line:
-            time.sleep(0.2)
-            continue
-
-        line = line.strip()
-
-        if line:
-            append_log(job_id, line)
-
-            if "[download]" in line:
-                update_job(job_id, status="ダウンロード中...")
-
-                progress = parse_progress(line)
-
-                if progress is not None:
-                    update_job(job_id, progress=min(progress, 90))
-
-            if "Merging formats" in line or "[Merger]" in line:
-                update_job(job_id, status="映像と音声を結合中...", progress=92)
-
-            if "Extracting URL" in line:
-                update_job(job_id, status="動画情報を取得中...", progress=5)
-
-            if "Downloading webpage" in line:
-                update_job(job_id, status="YouTubeに接続中...", progress=10)
-
-            if "Solving JS challenges" in line:
-                update_job(job_id, status="JS認証を処理中...", progress=15)
-
-    remaining = process.stdout.read()
-
-    if remaining:
-        for line in remaining.splitlines():
-            append_log(job_id, line)
-
-    return process.returncode
-
-
-def download_worker(job_id, video_id, quality):
     url = f"https://www.youtube.com/watch?v={video_id}"
-
-    update_job(
-        job_id,
-        state="running",
-        status="準備中...",
-        progress=1
-    )
 
     cookie_path, cookie_error = prepare_cookie()
 
     if cookie_error:
-        update_job(
-            job_id,
-            state="error",
-            status="cookieエラー",
-            progress=0
-        )
-        append_log(job_id, cookie_error)
-        return
+        return f"""
+        <h2>DL失敗</h2>
+        <p>{html.escape(cookie_error)}</p>
+        <p>{html.escape(explain_error(cookie_error))}</p>
+        """, 500
 
     ffmpeg_path = get_ffmpeg_path()
 
     if not ffmpeg_path:
-        update_job(
-            job_id,
-            state="error",
-            status="ffmpegエラー",
-            progress=0
-        )
-        append_log(job_id, "ffmpegが取得できません")
-        return
+        return """
+        <h2>DL失敗</h2>
+        <p>ffmpegが取得できません</p>
+        <p>ffmpeg-checkを確認してください。</p>
+        """, 500
 
-    temp_dir = tempfile.mkdtemp(prefix=f"yt_{job_id}_")
-    output_path = os.path.join(temp_dir, "%(title).80B [%(id)s].%(ext)s")
+    temp_dir = tempfile.mkdtemp(prefix="yt_")
+    output_path = os.path.join(temp_dir, "%(title).80s [%(id)s].%(ext)s")
 
     clients = [
         {"name": "web", "cookie": True},
@@ -649,20 +715,12 @@ def download_worker(job_id, video_id, quality):
         use_cookie = item["cookie"]
 
         for fmt in format_patterns:
-            update_job(
-                job_id,
-                status=f"{client} / {fmt} を試行中...",
-                progress=max(JOBS[job_id].get("progress", 1), 5)
-            )
-
             cmd = base_ytdlp_cmd(cookie_path if use_cookie else None)
             cmd = add_client_args(cmd, client)
 
             cmd = cmd + [
                 "--ffmpeg-location",
                 ffmpeg_path,
-
-                "--newline",
 
                 "-f",
                 fmt,
@@ -676,159 +734,74 @@ def download_worker(job_id, video_id, quality):
                 url
             ]
 
-            append_log(job_id, "----------------------------------------")
-            append_log(job_id, f"client={client}, cookie={use_cookie}, format={fmt}")
-
             try:
-                code = run_ytdlp_with_progress(job_id, cmd, timeout=420)
+                code, stdout, stderr = run_command(cmd, timeout=420)
+
+                output = stdout + "\n" + stderr
 
                 if code == 0:
-                    update_job(job_id, status="ファイル確認中...", progress=95)
-
                     mp4_file = find_mp4_file(temp_dir)
 
                     if mp4_file and os.path.exists(mp4_file):
                         filename = os.path.basename(mp4_file)
 
-                        update_job(
-                            job_id,
-                            state="done",
-                            status="完了",
-                            progress=100,
-                            file_path=mp4_file,
-                            filename=filename
+                        return send_file(
+                            mp4_file,
+                            as_attachment=True,
+                            download_name=filename,
+                            conditional=False,
+                            max_age=0
                         )
-                        append_log(job_id, f"完成: {filename}")
-                        return
 
                     any_file = find_any_file(temp_dir)
 
                     if any_file:
                         errors.append(
-                            f"mp4なし。生成ファイル: {os.path.basename(any_file)}"
+                            f"client={client}, cookie={use_cookie}, format={fmt}: mp4なし。生成ファイル: {os.path.basename(any_file)}"
                         )
                     else:
                         errors.append(
-                            "成功扱いだがファイルなし"
+                            f"client={client}, cookie={use_cookie}, format={fmt}: 成功扱いだがファイルなし"
                         )
 
                 else:
                     errors.append(
-                        f"client={client}, format={fmt}, code={code}"
+                        f"""
+client={client}
+cookie={use_cookie}
+quality={quality}
+format={fmt}
+return code={code}
+STDOUT:
+{stdout}
+STDERR:
+{stderr}
+"""
                     )
+
+            except subprocess.TimeoutExpired:
+                errors.append(
+                    f"client={client}, cookie={use_cookie}, format={fmt}: タイムアウト"
+                )
 
             except Exception as e:
                 errors.append(
-                    f"client={client}, format={fmt}, 例外: {str(e)}"
+                    f"client={client}, cookie={use_cookie}, format={fmt}: 例外 {str(e)}"
                 )
 
-            append_log(job_id, "この条件では失敗。次を試します。")
+    error_output = "\n".join(errors)
 
-    update_job(
-        job_id,
-        state="error",
-        status="すべて失敗しました",
-        progress=0
-    )
+    if len(error_output) > 60000:
+        error_output = error_output[:60000] + "\n\n--- エラー出力が長すぎるため省略 ---"
 
-    append_log(job_id, "失敗一覧:")
-    for err in errors:
-        append_log(job_id, err)
+    reason = explain_error(error_output)
 
-
-@app.route("/", methods=["GET", "POST"])
-def home():
-    video_id = None
-    error = None
-
-    if request.method == "POST":
-        text = request.form.get("input", "").strip()
-        video_id = get_video_id(text)
-
-        if not video_id:
-            error = "YouTube URLを入力してください"
-
-    return render_template_string(
-        HTML,
-        video_id=video_id,
-        error=error
-    )
-
-
-@app.route("/start-download", methods=["POST"])
-def start_download():
-    data = request.get_json(silent=True) or {}
-
-    video_id = data.get("v")
-    quality = data.get("q", "auto")
-
-    if not video_id:
-        return jsonify({
-            "error": "動画IDがありません"
-        }), 400
-
-    job_id = uuid.uuid4().hex
-
-    JOBS[job_id] = {
-        "state": "queued",
-        "status": "待機中",
-        "progress": 0,
-        "log": "",
-        "file_path": None,
-        "filename": None,
-        "created_at": time.time(),
-    }
-
-    thread = threading.Thread(
-        target=download_worker,
-        args=(job_id, video_id, quality),
-        daemon=True
-    )
-
-    thread.start()
-
-    return jsonify({
-        "job_id": job_id
-    })
-
-
-@app.route("/progress/<job_id>")
-def progress(job_id):
-    job = JOBS.get(job_id)
-
-    if not job:
-        return jsonify({
-            "state": "error",
-            "status": "ジョブが見つかりません",
-            "progress": 0,
-            "log": ""
-        }), 404
-
-    return jsonify(job)
-
-
-@app.route("/file/<job_id>")
-def file_download(job_id):
-    job = JOBS.get(job_id)
-
-    if not job:
-        return "ジョブが見つかりません", 404
-
-    if job.get("state") != "done":
-        return "まだ完了していません", 400
-
-    file_path = job.get("file_path")
-
-    if not file_path or not os.path.exists(file_path):
-        return "ファイルが見つかりません", 404
-
-    return send_file(
-        file_path,
-        as_attachment=True,
-        download_name=job.get("filename") or "video.mp4",
-        conditional=False,
-        max_age=0
-    )
+    return f"""
+    <h2>DL失敗</h2>
+    <p><strong>日本語の原因候補：</strong>{html.escape(reason)}</p>
+    <p>{html.escape(quality)} で失敗しました。720pや360pも試してください。</p>
+    <pre>{html.escape(error_output)}</pre>
+    """, 500
 
 
 @app.route("/health")
